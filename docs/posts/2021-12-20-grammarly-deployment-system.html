@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+        <meta http-equiv="x-ua-compatible" content="ie=edge">
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <title>Declarative Takes - Building a Flexible Deployment System for Grammarly for Windows using F# and AWS Lambda</title>
+        <link rel="icon" type="image/x-icon" href="../images/favico.png">
+        <link rel="stylesheet" href="../css/default.css" />
+    </head>
+    <body>
+        <header>
+            <div class="logo">
+                <a href="../">Declarative Takes</a>
+            </div>
+            <nav>
+                <a href="../">Home</a>
+                <a href="../about.html">About</a>
+                <a href="../contact.html">Contact</a>
+            </nav>
+        </header>
+
+        <main role="main">
+            <h1>Building a Flexible Deployment System for Grammarly for Windows using F# and AWS Lambda</h1>
+            <article>
+    <section class="header">
+        Posted on December 20, 2021
+        
+    </section>
+    <section>
+        <p><img src="../images/image14.png" style="width:5.5in" /></p>
+<p>Recently our team released a new desktop application product offering, <a href="https://www.grammarly.com/blog/introducing-grammarly-for-mac-windows/"><u>Grammarly for Windows and Mac</u></a>, which we've been working on for some time now. It’s a desktop application that provides writing assistance in the browser and on many of the most popular desktop apps like Microsoft Office, Slack, or Discord.</p>
+<p>One of the challenges with this project was how to deploy this complex application to millions of users. We wanted to make sure each user got the right version, since they might be using a newer or older operating system and we frequently run A/B tests to do data-driven product development. We also wanted to make sure we could push updates without any delay.</p>
+<p>For Windows, we solved this by migrating and modifying code that we wrote to deploy Grammarly for MS Office about a year ago. While working on that code, I thought it would be interesting to share how we built our deployment system, which involved writing our own query language and our own parser and interpreter for that language (and it was nowhere near as hard as it sounds!). Really, it’s a story about how F# and functional programming can help solve complex problems efficiently and in creative ways.</p>
+<p>In case this content looks familiar, it’s a condensed version of a talk I gave at <a href="https://fsharp-ukraine.org/2020/vitaly_braslavsky.html"><u>F# Ukraine</u></a> :)</p>
+<h2 id="background-application-code-deployment">Background: Application code deployment</h2>
+<p>To give more context around what the problem is, we need to travel to the land of application code deployment. Let’s first look at what it’s like to deploy on the server vs. the client to give a sense of the differences and challenges on both sides.</p>
+<p><img src="../images/image18.png" style="width:6.5in;height:3.24722in" /></p>
+<p>We can imagine a complex web of interconnected (micro)services, each with its own specific version of the application deployed. If we want to update one of the versions on one of the servers, we can do this relatively easily by deploying a new version of the code or a bug fix to machines that we own. But we do have to answer some complex questions around how the new code will work with other services, what the downtime may be, DB migrations, etc.</p>
+<p>Even though the problems to solve on the server side are quite complex, there are some robust solutions for service code deployment. On the other hand, there are few options for desktop applications to manage their version for users. Adding to the complexity is the fact that the executables are located on the users’ machines, and it's not as easy to quickly push a new version or bug fix as it is on our servers.</p>
+<p><img src="../images/image6.png" style="width:6.5in;height:3.4in" /></p>
+<p>We also have a complex list of rules and conditions that we’d like to put into place to determine which user should get which version of the application. This might be based on whether they have a newer or older operating system, are part of a certain A/B experiment, and so on.</p>
+<p>Given this setup, how should we make sure that the right version of the application is always pushed to the right user in an efficient manner?</p>
+<h2 id="the-solution-make-dynamic-deployment-decisions-on-the-server">The solution: Make dynamic deployment decisions on the server</h2>
+<p>By making deployment decisions on the server rather than the client, we’re able to dynamically match the right version with the right client based on their current context. And we stay flexible for adding more rules and conditions in the future.</p>
+<p><img src="../images/image7.png" style="width:6.5in;height:3.925in" /></p>
+<p>The decision itself would be based on a user’s context, e.g., their Grammarly identifiers or experiments they are participating in, or other limited environment data that can be helpful to give a better user experience.</p>
+<p><img src="../images/image25.png" style="width:6.5in;height:6.37986in" /></p>
+<p>By having this context and matching it with our expectations, we can do an actual configuration of which version should go to which user.</p>
+<p><img src="../images/image16.png" style="width:6.5in;height:3.61458in" /></p>
+<h2 id="why-we-built-our-deployment-system-in-house">Why we built our deployment system in-house</h2>
+<p>Once we’d identified what type of system we needed, the obvious first step was to look into existing solutions and see if we could find something that fit our needs. After researching, we concluded that each existing option missed one or more of our key requirements for a variety of reasons:</p>
+<ul>
+<li><p>It statically forced the version, with no dynamic decision based on client context</p></li>
+<li><p>Decision-making happened on the client, not the server</p></li>
+<li><p>The source code was closed and non-extensible, so we couldn’t add required functionality</p></li>
+</ul>
+<p>Therefore, we decided to design our own lightweight deployment solution.</p>
+<p>One of our key requirements was to have a highly flexible way to specify the conditions under which we should deliver a particular version to a specific user. After considering other less viable options, we chose to design our own context-matching domain-specific language (DSL) for this purpose.</p>
+<h2 id="designing-a-dsl-for-json-matching">Designing a DSL for JSON matching</h2>
+<p>But why did we need a special domain language? Why couldn't we have just used our favorite programming language to encode our deployment rules? Well, we could have, but we might have run into a few problems:</p>
+<ul>
+<li><p>Each rule change would require a code deployment and some downtime</p></li>
+<li><p>A general-purpose language, while it does provide plenty of flexibility, introduces more ways for us to do something wrong</p></li>
+<li><p>Usually, it's harder to read an encoding in a general-purpose language vs. a DSL (as an analogy, imagine configuring SQL requests in code instead of writing SQL queries directly)</p></li>
+</ul>
+<p>So, we decided to design a simple domain-specific language that would cover all our requirements. This is how <strong>Update Rules</strong> was born. It’s a DSL that lets us match rules on JSON context data from the client and outputs the correct application version number.</p>
+<p><img src="../images/image10.png" style="width:6.5in;height:2.70625in" /></p>
+<p>Before we started developing our Update Rules DSL, we first defined a few basic requirements around its syntax.</p>
+<h3 id="fields">Fields</h3>
+<p>First of all, we wanted our DSL to be as intuitive to use as possible, which meant that specifying fields should work like it does in JSON. We decided to place fields inside curly braces and use periods to match nested fields, giving developers the impression that they’re simply accessing regular JSON object fields.</p>
+<p><img src="../images/image4.png" style="width:6.5in;height:3.11597in" /></p>
+<h3 id="literals">Literals</h3>
+<p>As for literals, no exotic types were needed here, just the plain and simple data types that JSON supports: String, Number, Boolean, and arrays of those types.</p>
+<p><img src="../images/image17.png" style="width:6.5in;height:3.37708in" /></p>
+<h3 id="conditions">Conditions</h3>
+<p>To create our logic around dynamic versioning, we needed to define some conditional operators to apply to incoming data.</p>
+<p><img src="../images/image22.png" style="width:6.5in;height:3.68889in" /></p>
+<p>We have the basic comparison operators you find in any language, as well as specific operators like contains, exists, and in. For our DSL we also wanted to change some semantics:</p>
+<h4 id="comparing-everything">Comparing everything</h4>
+<blockquote>
+<p>Even though not all operators are defined on every type (mathematically speaking), for flexibility reasons we wanted to relax this restriction by defining special comparison rules for strings, booleans, integers, and arrays.</p>
+<p><img src="../images/image21.png" style="width:6.5in;height:3.18889in" /></p>
+</blockquote>
+<h4 id="containability">Containability</h4>
+<blockquote>
+<p>We also needed to be able to check if some elements are part of another—for example, if a field is a substring of another string, or an array contains a literal.</p>
+</blockquote>
+<blockquote>
+<p><img src="../images/image26.png" style="width:6.5in;height:2.91528in" /></p>
+</blockquote>
+<h4 id="presence">Presence</h4>
+<blockquote>
+<p>Finally, we needed to be able to easily determine if a field was present at all in the JSON context data.</p>
+<p><img src="../images/image20.png" style="width:6.5in;height:2.81458in" /></p>
+</blockquote>
+<h3 id="combinations">Combinations</h3>
+<p>Any conditional logic would be incomplete without ways of combining conditions, so here we have AND and OR boolean combinators to be able to configure our matching more precisely.</p>
+<p><img src="../images/image30.png" style="width:6.5in;height:2.67639in" /></p>
+<h3 id="outcome">Outcome</h3>
+<p>Once we have our conditions in place, we can specify what exactly we're expecting as a result: Given a context, we can define what application version users should receive.</p>
+<p><img src="../images/image28.png" style="width:6.5in;height:2.46875in" /></p>
+<h2 id="parsing-matching-and-deciding">Parsing, matching, and deciding</h2>
+<p>You might naturally be skeptical of this entire idea so far. After all, even if you’ve designed a handy DSL for your use case, you still need to be able to parse and interpret it—which can seem like quite a task. But here’s where F# and FParsec come into play, making things much easier.</p>
+<p><a href="https://www.quanttec.com/fparsec/"><u>FParsec</u></a> is a special parsing library called a parser combinator library. Although that might sound scary, it actually just means that we have a collection of various parsers in the library as well as many ways (functions) to combine them. So, basically, F# has an embedded DSL (oh my, DSLs again) for parsing DSLs…and other structured things as well. Parser combinators are a powerful technique for building parsers in a way that’s well-defined and easy to grasp. It looks very much like transferring <a href="https://en.wikipedia.org/wiki/Extended_Backus%E2%80%93Naur_form"><u>EBNF</u></a>-like language grammar into F# code, with all the benefits of a strongly-typed functional programming language. My hope here is to show you that it's actually quite easy to parse any structured data or simple programming language. Parser combinators are significantly easier to understand than regexes, for example—and they’re capable of parsing <a href="https://stackoverflow.com/questions/1732348/regex-match-open-tags-except-xhtml-self-contained-tags/1732454#1732454"><u>XML</u></a> :)</p>
+<h3 id="rule-structure">Rule structure</h3>
+<p>Before writing any code, we used EBNF-like notation to document our Update Rule structure in a compact, readable form. It gives us a sort of cheat sheet to look at when coding parsers so we can have a better understanding of what some particular rule substructure is looking like.</p>
+<p><img src="../images/image23.png" style="width:6.5in;height:3.93472in" /></p>
+<h3 id="domain-types">Domain types</h3>
+<p>Now that we know what our rules should look like, it's time to actually do some coding. With a language as strongly typed as F#, it's always a good idea to start with encoding invariants within domain types.</p>
+<p><img src="../images/image29.png" class="center-image" style="width:5.5in" /></p>
+<p>If we look closer, we can notice that the most important parts of the domain nicely reflect the structure of our EBNF specification.</p>
+<p><img src="../images/image31.png" style="width:7.5in" /></p>
+<h3 id="parser-combinators">Parser combinators</h3>
+<p>Before going any deeper, we need to familiarize ourselves with the basic concepts of the FParsec library: parsers and combinators. Here’s the definition from <a href="https://en.wikipedia.org/wiki/Parser_combinator"><u>Wikipedia</u></a>: “In computer programming, a parser combinator is a higher-order function that accepts several parsers as input and returns a new parser as its output.”</p>
+<p>That definition doesn't say much, but what it says is plenty for us to build an intuition for what’s going on. A combinator is just a function that takes two or more things and combines them in a particular manner. In our case, those things are text parsers. In a moment, I’ll explain a few ways of performing those combinations.</p>
+<p>As for parsers, the basic definition is a function that transforms less structured data (like text) into more structured data (like integers). The FParsec library adds some more implementation details to the concepts of combinators and parsers, but the fundamental meanings stay the same.</p>
+<h3 id="fparsec-library">FParsec library</h3>
+<p><img src="../images/image24.png" class="center-image" style="width:4.225in" /></p>
+<p>Parsec is a family of parser libraries in functional programming languages that first originated in Haskell. Though the implementation differs, the API is similar for each. These kinds of parsers are fairly simple to use in your preferred programming language without any additional configuration. Yet they are powerful enough to parse quite complex grammars (even parsing programming languages) and other structured text. </p>
+<p>Looking at FParsec in particular, here are some functions that you can use to build more complex parsers:</p>
+<p><img src="../images/image27.png" style="width:6.5in" /></p>
+<p>The first two are simple parsers that move through the text and parse integer or spaces correspondingly. <code>pchar</code> is simply a parser constructor (or factory) that takes a character to parse and returns a configured parser. And the last one, between, is a parser combinator. It takes two bracketing characters and pushes into its middle parser everything in between.</p>
+<p>If we look closer at the definition of the <code>Parser</code> type, it's just a function that takes a stream of characters and returns the result, failure or success, depending on the parsing outcome.</p>
+<p><img src="../images/image2.png" style="width:6.5in" /></p>
+<p>To build more intuition around what it looks like to do parsing with these primitives, we can look at this example:</p>
+<p><img src="../images/image1.png" style="width:6.5in" /></p>
+<p>Here we have a simple expression: <code>(1 + 2)</code>, adding two numbers inside parentheses. We want to parse those two numbers into a tuple. To do so, we're using the library functions mentioned earlier and building a single parser by combining other, simpler parsers. In the highlighted row, we're constructing the main part of the parser. Without going deeper into what exactly is going on yet, we can see the general structure: <code>parsing integer -(then)-&gt; parsing spaces -(then)-&gt; parsing character "+" -(then)-&gt; parsing spaces -(then)-&gt; parsing integer</code>.</p>
+<p><img src="../images/image3.png" style="width:6.5in;height:2.94722in" /></p>
+<p>On top of this, we also need to specify that the addition expression is enclosed inside parentheses. To do so, we're using between, which you may recall is a parser combinator that can return a parser for text enclosed inside starting and ending symbols. In this case, the starting and ending symbols are the open and close parentheses, and we’re also passing in a parser that’s configured for what we expect to see between those symbols.</p>
+<p>The only thing unknown for us now is the combinators circled in yellow in the snippet. Those are special combinators that specify the order of parsing and the value we should keep or discard while progressing through the text. They have quite handy mnemonics to remember what they’re doing: The arrows show the direction of the parsing flow, and the dot shows from which side of the combinator we should keep the value to work on later.</p>
+<p><img src="../images/image8.png" style="width:6.5in;height:1.82986in" /></p>
+<h3 id="parsing-a-rule">Parsing a rule</h3>
+<p>Knowing all of this now, we can look at the real code for parsing some parts of a rule:</p>
+<p><img src="../images/image19.png" style="width:8in" /></p>
+<p>Here we can find all the familiar parsers and combinators, and many more. If we look at our EBNF notation once more, we’ll find similarities with parsers as well.</p>
+<p><img src="../images/image11.png" style="width:9.5in" /></p>
+<p>One of the most important things to note is that we don't just parse text into primitive types, but rather we build an <a href="https://en.wikipedia.org/wiki/Abstract_syntax_tree"><u>abstract</u> <u>syntax</u> <u>tree</u></a> on the fly.</p>
+<p><img src="../images/image12.png" style="width:8.5in" /></p>
+<p>And as an end result, we're getting a clean final function that parses all the text into our bespoke domain model, or returns a nice error explaining why it can't do it.</p>
+<p><img src="../images/image5.png" style="width:6.5in;height:2.32153in" /></p>
+<p>Here’s an example of a rule and its corresponding domain model:</p>
+<p><img src="../images/image9.png" style="width:6.5in;height:4.49097in" /></p>
+<h3 id="matching-a-rule">Matching a rule</h3>
+<p>A parsed rule is quite nice-looking by itself, but we can't do anything useful with it until we can properly interpret the encoded instructions.</p>
+<p><img src="../images/image15.png" style="width:8.5in" /></p>
+<p>This can be done rather straightforwardly by recursively traversing the AST we built. With <a href="https://en.wikipedia.org/wiki/Algebraic_data_type"><u>algebraic</u> <u>data</u> <u>types</u></a>, we’re able to precisely encode our rule configuration, match it using the default F# pattern matching techniques, and interpret it in the desired way.</p>
+<h2 id="aws-lambda-to-the-lazy-engineers-rescue">AWS Lambda to the "lazy" engineer’s rescue</h2>
+<p>Having implemented everything we discussed, the only thing left is to wrap it all up into a web application and conveniently host it somewhere.</p>
+<p>Where do you go when you want to spawn a small server for your small service with no configuration and scalability burdens? Correct, you go to the “stateless,” “serverless” building blocks that each of the major service providers has: <a href="https://aws.amazon.com/lambda/"><u>AWS</u> <u>Lambda</u></a>, <a href="https://azure.microsoft.com/en-us/services/functions/"><u>Azure Functions</u></a>, or <a href="https://cloud.google.com/functions"><u>Google Cloud Functions</u></a>. As we're already running a lot of our services on Amazon, it was quite natural for us to look into AWS Lambda first. And surprisingly, AWS has everything needed for F# functions to run: from the .NET runtime to tooling and scaffolding templates.</p>
+<p>The overall solution looked something like this:</p>
+<p><img src="../images/image13.png" style="width:7.5in" /></p>
+<p>AWS already has F# templates based on the <a href="https://github.com/giraffe-fsharp/Giraffe"><u>Giraffe web framework</u></a> with all the necessary boilerplate for query parameters and other AWS service communication configurations built in. So basically, it was just as simple as bundling up the core matching mechanism and deploying this code as a Lambda service. The nice things about Lambda are:</p>
+<ul>
+<li><p>It’s easy to configure and deploy code to it</p></li>
+<li><p>It has automatic scaling, so there’s no need to worry about your load patterns</p></li>
+<li><p>Costs are lower since you're just paying for your current load and work actually performed</p></li>
+</ul>
+<h2 id="nice-things-about-f-and-functional-programming">Nice things about F# and functional programming</h2>
+<p>Having gone deep into the details of writing our DSL, parser, and interpreter, I’d like to wrap up with a few points about F# and functional programming in general.</p>
+<ul>
+<li><p>If it compiles, it has no bugs. :) Jokes aside, we haven’t found a single production bug since launching this code a year ago.</p></li>
+<li><p>It’s great for fast prototyping. The initial prototype was developed during the weekend while just exploring an interesting concept.</p></li>
+<li><p>Even though F# might not top any charts of most-used programming languages, it has a quite nice vendor support, as we saw with AWS Lambda scaffolding.</p></li>
+<li><p>Functional programming in F# and the rich ecosystem surrounding it opens the door to creative solutions for problems in a reasonable time.</p></li>
+</ul>
+    </section>
+</article>
+
+        </main>
+
+        <footer>
+            Site proudly generated by
+            <a href="http://jaspervdj.be/hakyll">Hakyll</a>
+        </footer>
+    </body>
+</html>
